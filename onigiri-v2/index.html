@@ -16,7 +16,8 @@
 // もとのアイデア：claude.ai に入れた1行「ご飯を握って、きれいな三角おにぎりを作るゲームを作って。スマホでタップして遊べるように。」
 // 作り直し：Claude Code。仕様 /Users/yui/アプリ/mikaYoutube/02_onigiri_remake.md の4章
 // 遊び方：3回のチャンスでSランクを目指す。1回の挑戦で三角の3辺を順ににぎる。針が金色のときにタップ。
-//   弱すぎ → くずれる／強い → せんべい／あぶない（右端）→ 米が飛び散る。失敗はその場で次の挑戦へ。
+//   にぎるたびに、その辺の形が変わる。3辺にぎったら、3つの結果の組み合わせで分岐する
+//   （3辺とも金色→完成／あぶないがある→米が飛び散る／つよい2つ以上→せんべい／やさしすぎ2つ以上→くずれる／ほか→いびつ）
 (() => {
 const C = document.getElementById("c"), g = C.getContext("2d");
 let W = 0, H = 0, dpr = 1, S = 1, ox = 0, oy = 0;
@@ -29,6 +30,7 @@ addEventListener("resize", resize); resize();
 
 // ---- 色（仕様7章：クリームの地・ミント・濃い紫・白い米・赤） ----
 const BG = "#fbf3e4", INK = "#3b2a55", RED = "#e2474b", GOLD = "#f4b63c", MINT = "#bfe3cf", MINTD = "#6fb08e";
+const RESCOL = { gold: "#6fb08e", weak: "#5f9fc4", strong: "#e47b3e", extreme: "#b8234a" };
 const SKIN = "#f6c9a3", WEAKC = "#cfe6f2", STRONGC = "#f39a63", DANGER = "#b8234a";
 const FONT = '"Hiragino Maru Gothic ProN","Zen Maru Gothic","Yu Gothic",sans-serif';
 
@@ -55,10 +57,10 @@ const GX0 = 40, GX1 = 500, GY0 = 614, GY1 = 650;
 
 // ---- 状態 ----
 let st = "title", tState = 0, now = 0, lastNow = 0;
-let attempts = 3, tryNo = 1, side = 0, done = [false, false, false], accs = [];
+let attempts = 3, tryNo = 1, side = 0, res = [], accs = [];
 let r = blob(), rFrom = r, rTo = r, shape = "blob", anim = null, outcome = null;
 let phase = Math.random() * 2, needle = 0, rank = null, rankTitle = "", accPct = 0;
-let msg = null, parts = [], shakeT = -9, flashT = -9, best = 0, muted = false;
+let doneT = 0, msg = null, parts = [], shakeT = -9, flashT = -9, best = 0, muted = false;
 try { best = +localStorage.getItem("onigiriV2Best") || 0; muted = localStorage.getItem("onigiriV2Mute") === "1"; } catch (e) {}
 const tri = p => { p = ((p % 2) + 2) % 2; return p < 1 ? p : 2 - p; };
 const speed = () => 0.9 * (1 + 0.18 * side);   // 1秒で何往復の半分か（3辺目ほど速い）
@@ -66,42 +68,61 @@ function say(text, col = "#fff", sub = "") { msg = { text, col, sub, t: now }; }
 
 function startRun() { attempts = 3; tryNo = 1; parts = []; newAttempt(); bgmStart(); SE.start(); }
 function newAttempt() {
-  r = blob(); rFrom = rTo = r; shape = "blob"; side = 0; done = [false, false, false]; accs = []; parts = parts.filter(p => p.landed);
+  r = blob(); rFrom = rTo = r; shape = "blob"; side = 0; res = []; accs = []; parts = parts.filter(p => p.landed);
   st = "aim"; tState = now; msg = null; outcome = null; anim = null; phase = Math.random() * 2;
 }
 function press() {
   const v = needle, z = zone(v);
   anim = { t: now, v, z, side, dur: 460, hit: false };
   rFrom = r.slice();
-  if (z === "gold") rTo = r.map((x, i) => x + (T[i] - x) * .97 * WS[side][i] / WSUM[i]);
-  else if (z === "strong") rTo = TH.map(t => 1.62 * (1 + .03 * Math.sin(5 * t + 1)));
-  else if (z === "weak") rTo = TH.map(t => 1 / Math.sqrt((Math.cos(t) / 1.75) ** 2 + (Math.sin(t) / .92) ** 2));
-  else rTo = TH.map(t => .48 * (1 + .12 * Math.sin(3 * t) + .08 * Math.sin(5 * t + 2)));
+  const w = i => WS[side][i] / WSUM[i];   // この辺にどれだけ効くか（0〜1）
+  if (z === "gold") rTo = r.map((x, i) => x + (T[i] - x) * .97 * w(i));            // まっすぐ
+  else if (z === "weak") rTo = r.map((x, i) => x + (1.6 - x) * .8 * w(i));          // ふくらむ
+  else if (z === "strong") rTo = r.map((x, i) => x + (.78 - x) * .8 * w(i) + .1 * (1 - w(i)));  // へこんで、ほかが広がる
+  else rTo = r.map((x, i) => x + (.5 - x) * .95 * w(i));                            // えぐれる
   st = "press"; SE.grip(z);
 }
 function contact(a) {   // 手がごはんに触れた瞬間
-  if (a.z === "extreme") { explode(); shakeT = now; flashT = now; }
+  if (a.z === "extreme") { burst(a.side, 110); shakeT = now; flashT = now; SE.boom(); }
   if (a.z === "strong") shakeT = now;
 }
-function land(a) {      // にぎり終わり
-  anim = null; r = rTo.slice();
-  if (a.z === "gold") {
-    done[a.side] = true; accs.push(Math.max(0, 1 - Math.abs(a.v - .5) / .1));
-    side++; SE.ding(side);
-    if (side === 3) { complete(); return; }
-    say("ちょうどいい！", GOLD, `${side}辺できた・のこり${3 - side}辺`); st = "aim"; tState = now; return;
+const TAP_MSG = { gold: ["ちょうどいい！", GOLD], weak: ["ふにゃっ…", "#e3f1fb"], strong: ["ぺたっ…", "#ffd9c7"], extreme: ["米が飛んだ！", "#ffd0dc"] };
+const ZNAME = { gold: "金色", weak: "やさしすぎ", strong: "つよい", extreme: "あぶない" };
+function land(a) {      // にぎり終わり（1辺ぶん）
+  anim = null; r = rTo.slice(); res.push(a.z);
+  if (a.z === "gold") { accs.push(Math.max(0, 1 - Math.abs(a.v - .5) / .1)); SE.ding(a.side + 1); }
+  else if (a.z === "weak") SE.poof();
+  else if (a.z === "strong") SE.crack();
+  side++;
+  const [t, c] = TAP_MSG[a.z];
+  if (side < 3) { say(t, c, `のこり${3 - side}辺`); st = "aim"; tState = now; return; }
+  say(t, c); st = "reveal"; tState = now;   // 3辺おわり →「結果は…」
+}
+function count(z) { return res.filter(x => x === z).length; }
+function finishAttempt() {   // 3辺の結果の組み合わせで分岐
+  if (count("gold") === 3) { complete(); return; }
+  attempts--; st = "fail"; tState = now; rFrom = r.slice();
+  const sum = ["gold", "weak", "strong", "extreme"].filter(z => count(z)).map(z => `${ZNAME[z]}${count(z)}`).join("・");
+  if (count("extreme") > 0) {
+    outcome = "extreme"; shape = "lump"; rTo = TH.map(t => .48 * (1 + .12 * Math.sin(3 * t) + .08 * Math.sin(5 * t + 2)));
+    burst(-1, 220); shakeT = now; flashT = now; SE.boom(); say("米が飛び散った！", "#ffd0dc", sum);
+  } else if (count("strong") >= 2) {
+    outcome = "strong"; shape = "senbei"; rTo = TH.map(t => 1.62 * (1 + .03 * Math.sin(5 * t + 1)));
+    shakeT = now; SE.crack(); say("せんべいになった…", "#ffd9c7", sum);
+  } else if (count("weak") >= 2) {
+    outcome = "weak"; shape = "puddle"; rTo = TH.map(t => 1 / Math.sqrt((Math.cos(t) / 1.75) ** 2 + (Math.sin(t) / .92) ** 2));
+    SE.poof(); say("くずれた…", "#e3f1fb", sum);
+  } else {
+    outcome = "mixed"; shape = "blob"; rTo = r.slice();
+    SE.over(); say(count("gold") === 2 ? "おしい！あと1辺" : "いびつなおにぎり", "#fff", sum);
   }
-  attempts--; st = "fail"; tState = now; outcome = a.z;
-  if (a.z === "strong") { shape = "senbei"; say("せんべいになった…", "#ffd9c7"); SE.crack(); }
-  else if (a.z === "weak") { shape = "puddle"; say("くずれた…", "#e3f1fb"); SE.poof(); }
-  else { shape = "lump"; say("米が飛び散った！", "#ffd0dc"); }
 }
 function nextAttempt() {
   if (attempts > 0) { tryNo++; newAttempt(); }
   else { st = "over"; tState = now; say("おしまい…", "#fff", "3回とも失敗。もう一回やってみよう"); SE.over(); bgmStop(); }
 }
 function complete() {
-  st = "complete"; tState = now; rFrom = r.slice(); rTo = T.slice(); shape = "tri";
+  st = "complete"; tState = now; doneT = now; rFrom = r.slice(); rTo = T.slice(); shape = "tri";
   say("完成！", "#fff"); SE.complete();
 }
 function toResult() {
@@ -114,11 +135,12 @@ function toResult() {
 }
 
 // ---- 米粒（飛び散る・まな板に落ちる） ----
-function explode() {
-  for (let i = 0; i < 260; i++) {
-    const a = Math.random() * Math.PI * 2, sp = 350 + Math.random() * 850;
+function burst(sideIdx, n) {   // sideIdx：その辺から飛ぶ（-1 は全体から）
+  for (let i = 0; i < n; i++) {
+    const a = sideIdx < 0 ? Math.random() * Math.PI * 2 : NORM[sideIdx] + (Math.random() - .5) * 1.8, sp = 350 + Math.random() * 850;
     const stay = Math.random() < .3;
-    parts.push({ x: CX + Math.cos(a) * A * .5, y: CY + Math.sin(a) * A * .5, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 260,
+    const d = sideIdx < 0 ? .5 : 1.1;
+    parts.push({ x: CX + Math.cos(a) * A * d, y: CY + Math.sin(a) * A * d, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 260,
       rot: Math.random() * 6, vr: (Math.random() - .5) * 18, l: .8 + Math.random() * .5,
       floor: stay ? 455 + Math.random() * 140 : 99999, landed: false });
   }
@@ -209,7 +231,7 @@ addEventListener("keydown", e => { if (e.code === "Space" || e.code === "Enter")
 document.addEventListener("visibilitychange", () => { if (!ac) return; document.hidden ? ac.suspend() : ac.resume(); });
 // 読み取り専用（撮影・テスト用）：今の針の位置と状態。ゲームの結果は変えない
 window.__gauge = () => needle; window.__state = () => st;
-window.__info = () => ({ st, attempts, tryNo, side, done: done.slice(), shape, outcome, rank, accPct, flying: parts.filter(p => !p.landed).length, landed: parts.filter(p => p.landed).length, rMin: Math.min(...r), rMax: Math.max(...r) });
+window.__info = () => ({ st, attempts, tryNo, side, res: res.slice(), shape, outcome, rank, accPct, flying: parts.filter(p => !p.landed).length, landed: parts.filter(p => p.landed).length, rMin: Math.min(...r), rMax: Math.max(...r) });
 
 // ---- 描く ----
 const ease = u => u < 0 ? 0 : u > 1 ? 1 : u * u * (3 - 2 * u);
@@ -246,12 +268,13 @@ function hud() {
   const mx = 330, my = 122, ms = 15;
   for (let k = 0; k < 3; k++) {
     const [a, b] = SIDE_V[k], pa = VERT[a], pb = VERT[b];
-    g.lineCap = "round"; g.lineWidth = 6; g.setLineDash(k === side && !done[k] && (st === "aim" || st === "press") ? [5, 5] : []);
-    g.strokeStyle = done[k] ? MINTD : k === side && (st === "aim" || st === "press") ? RED : "#d8d0e3";
+    const cur = k === side && (st === "aim" || st === "press") && k >= res.length;
+    g.lineCap = "round"; g.lineWidth = 6; g.setLineDash(cur ? [5, 5] : []);
+    g.strokeStyle = k < res.length ? RESCOL[res[k]] : cur ? RED : "#d8d0e3";
     g.beginPath(); g.moveTo(mx + pa[0] * ms, my + pa[1] * ms); g.lineTo(mx + pb[0] * ms, my + pb[1] * ms); g.stroke();
   }
   g.setLineDash([]);
-  const label = st === "title" ? "3辺を金色で" : st === "complete" || st === "result" ? "3辺 完成！" : done.every(x => x) ? "3辺 完成！" : `${SIDE_NAME[Math.min(side, 2)]}の辺 ${Math.min(side + 1, 3)}/3`;
+  const label = st === "title" ? "3辺を金色で" : st === "complete" || st === "result" ? "3辺 完成！" : side >= 3 ? "結果は…" : `${SIDE_NAME[side]}の辺 ${side + 1}/3`;
   text(label, 372, 118, 19, INK, { align: "left" });
 }
 
@@ -273,7 +296,7 @@ function guide() {
   g.save(); g.setLineDash([10, 8]); g.lineWidth = 4; g.strokeStyle = RED; g.globalAlpha = .85;
   g.beginPath(); g.moveTo(CX + pa[0] * A, CY + pa[1] * A); g.lineTo(CX + pb[0] * A, CY + pb[1] * A); g.stroke(); g.restore();
   for (let k = 0; k < 3; k++) {  // ほかの辺のお手本（うすく）
-    if (k === side || done[k]) continue;
+    if (k === side || k < res.length) continue;
     const [c, d] = SIDE_V[k], pc = VERT[c], pd = VERT[d];
     g.save(); g.setLineDash([6, 8]); g.lineWidth = 2; g.strokeStyle = "rgba(59,42,85,.28)";
     g.beginPath(); g.moveTo(CX + pc[0] * A, CY + pc[1] * A); g.lineTo(CX + pd[0] * A, CY + pd[1] * A); g.stroke(); g.restore();
@@ -296,14 +319,14 @@ function onigiri() {
     for (const [a, l] of [[.3, .9], [1.9, 1.1], [3.4, .8], [4.6, 1.2]]) { g.beginPath(); g.moveTo(CX, CY); g.lineTo(CX + Math.cos(a) * A * l * .7, CY + Math.sin(a) * A * l * .7); g.lineTo(CX + Math.cos(a + .25) * A * l * 1.3, CY + Math.sin(a + .25) * A * l * 1.3); g.stroke(); }
   }
   if (shape === "tri") {   // 海苔
-    const k = ease((now - tState) / 500);
+    const k = ease((now - doneT) / 500);
     g.fillStyle = "#1f2a1e"; const nw = A * 1.3, top = CY + A * .2 + (1 - k) * A * 2; g.fillRect(CX - nw / 2, top, nw, A * 2);
     g.strokeStyle = "rgba(140,190,130,.2)"; g.lineWidth = 1; for (let y = top + 7; y < CY + A * 1.4; y += 8) { g.beginPath(); g.moveTo(CX - nw / 2, y); g.lineTo(CX + nw / 2, y); g.stroke(); }
   }
   g.restore();
   pathOf(p); g.lineWidth = 4; g.strokeStyle = INK; g.stroke();
   if (shape === "tri") {   // 梅干しと、つやの光
-    const k = ease((now - tState - 300) / 400);
+    const k = ease((now - doneT - 300) / 400);
     g.fillStyle = RED; g.beginPath(); g.ellipse(CX, CY - A * .95, A * .26 * k, A * .19 * k, 0, 0, 7); g.fill(); g.lineWidth = 2.5; g.strokeStyle = INK; g.stroke();
     g.fillStyle = "rgba(255,255,255,.7)"; g.beginPath(); g.ellipse(CX - A * .08, CY - A * 1.0, A * .08 * k, A * .04 * k, -.4, 0, 7); g.fill();
   }
@@ -316,8 +339,9 @@ function face(dy) {
   g.save(); g.strokeStyle = INK; g.fillStyle = INK; g.lineWidth = 3.2; g.lineCap = "round"; g.lineJoin = "round";
   let kind = "idle";
   if (st === "press" && anim && now - anim.t > anim.dur * .4) kind = anim.z === "gold" ? "squint" : anim.z === "weak" ? "idle" : "pain";
-  if (st === "fail") kind = outcome === "strong" ? "pain" : outcome === "weak" ? "sleepy" : "dizzy";
-  if (st === "aim" && msg && now - msg.t < 700 && side > 0) kind = "happy";
+  if (st === "fail") kind = outcome === "strong" ? "pain" : outcome === "weak" ? "sleepy" : outcome === "extreme" ? "dizzy" : "idle";
+  if (st === "aim" && msg && now - msg.t < 700 && res.length && res[res.length - 1] !== "gold") kind = res[res.length - 1] === "weak" ? "sleepy" : "pain";
+  if (st === "aim" && msg && now - msg.t < 700 && res[res.length - 1] === "gold") kind = "happy";
   if (st === "complete" || st === "result") kind = "happy";
   if (st === "over") kind = "sleepy";
   const s = shape === "lump" ? .55 : 1;
@@ -347,10 +371,13 @@ function face(dy) {
 
 function checks() {
   for (let k = 0; k < 3; k++) {
-    if (!done[k] || !(st === "aim" || st === "press")) continue;
-    const n = NORM[k], x = CX + Math.cos(n) * A * 1.42, y = CY + Math.sin(n) * A * 1.42;
-    g.fillStyle = MINTD; g.beginPath(); g.arc(x, y, 16, 0, 7); g.fill(); g.lineWidth = 3; g.strokeStyle = "#fff"; g.stroke();
-    g.strokeStyle = "#fff"; g.lineWidth = 4; g.lineCap = "round"; g.beginPath(); g.moveTo(x - 7, y); g.lineTo(x - 2, y + 6); g.lineTo(x + 8, y - 6); g.stroke();
+    if (k >= res.length || !(st === "aim" || st === "press" || st === "reveal")) continue;
+    const n = NORM[k], x = CX + Math.cos(n) * A * 1.55, y = CY + Math.sin(n) * A * 1.55;
+    g.fillStyle = RESCOL[res[k]]; g.beginPath(); g.arc(x, y, 16, 0, 7); g.fill(); g.lineWidth = 3; g.strokeStyle = "#fff"; g.stroke();
+    g.strokeStyle = "#fff"; g.lineWidth = 4; g.lineCap = "round"; g.beginPath();
+    if (res[k] === "gold") { g.moveTo(x - 7, y); g.lineTo(x - 2, y + 6); g.lineTo(x + 8, y - 6); }
+    else { g.moveTo(x - 6, y - 6); g.lineTo(x + 6, y + 6); g.moveTo(x + 6, y - 6); g.lineTo(x - 6, y + 6); }
+    g.stroke();
   }
 }
 
@@ -400,7 +427,7 @@ function gauge() {
 }
 
 function button() {
-  const label = st === "title" ? "はじめる" : st === "aim" || st === "press" ? "にぎる！" : st === "fail" ? "つぎのおにぎり" : st === "complete" ? "結果を見る" : "もう一回にぎる";
+  const label = st === "title" ? "はじめる" : st === "aim" || st === "press" ? "にぎる！" : st === "reveal" ? "…" : st === "fail" ? "つぎのおにぎり" : st === "complete" ? "結果を見る" : "もう一回にぎる";
   const on = st === "aim" || st === "title" || (st === "fail" && now - tState > 700) || st === "complete" || ((st === "result" || st === "over") && now - tState > 800);
   const press = st === "press" ? 4 : 0;
   rr(40, 712 + press, 460, 82, 41); g.fillStyle = "#9e1f33"; g.fill();
@@ -410,6 +437,7 @@ function button() {
 }
 
 function popMsg() {
+  if (st === "reveal" && now - tState > 300) { text("結果は…", 270, 212, 40, "#fff", { stroke: 10 }); return; }
   if (!msg) return;
   const el = now - msg.t, sc = el < 160 ? .6 + .5 * (el / 160) : el < 260 ? 1.1 - .1 * ((el - 160) / 100) : 1;
   const keep = st === "aim" ? (el < 1100 ? 1 : Math.max(0, 1 - (el - 1100) / 300)) : 1;
@@ -424,11 +452,11 @@ function overlays() {
   if (st === "title") {
     rr(50, 196, 440, 360, 26); g.fillStyle = "rgba(255,255,255,.96)"; g.fill(); g.lineWidth = 4; g.strokeStyle = INK; g.stroke();
     text("きれいな三角に にぎろう", 270, 244, 28, INK);
-    const lines = [["針が", "金色", "のときにタップ"], ["下・右・左の", "3辺", "を順ににぎる"], ["チャンスは", "3回", "。Sランクをめざそう"]];
+    const lines = [["針が", "金色", "のときにタップ"], ["3辺", "にぎったら", "結果が出る"], ["チャンスは", "3回", "。Sランクをめざそう"]];
     lines.forEach(([a, b, c], i) => { g.font = `bold 20px ${FONT}`; const wa = g.measureText(a).width, wb = g.measureText(b).width, wc = g.measureText(c).width;
       let x = 270 - (wa + wb + wc) / 2; const y = 300 + i * 44; text(a, x, y, 20, INK, { align: "left" }); x += wa; text(b, x, y, 20, i === 0 ? "#c98a00" : RED, { align: "left" }); x += wb; text(c, x, y, 20, INK, { align: "left" }); });
     g.fillStyle = "#f6f0fa"; rr(78, 438, 384, 96, 16); g.fill();
-    text("強すぎると せんべい、", 270, 466, 18, "#b4532a"); text("もっと強いと…米が飛び散る！", 270, 502, 18, DANGER);
+    text("つよい が多いと せんべい、", 270, 466, 18, "#b4532a"); text("あぶない でにぎると…米が飛び散る！", 270, 502, 18, DANGER);
   }
   if (st === "result" && rank) {   // ランクのはんこ（おにぎりは隠さない）
     const k = Math.min(1, (now - tState) / 250), sc = k < 1 ? 1.8 - .8 * k : 1;
@@ -460,12 +488,13 @@ function frame(t) {
   if (st === "aim") { phase += dt * speed(); needle = tri(phase); }
   if (st === "press" && anim) {
     const u = (now - anim.t) / anim.dur;
-    if (!anim.hit && u >= .4) { anim.hit = true; contact(anim); if (anim.z === "extreme") { SE.boom(); r = rTo.slice(); shape = "lump"; } }
+    if (!anim.hit && u >= .4) { anim.hit = true; contact(anim); }
     const e = ease((u - .35) / .45);
-    if (anim.z !== "extreme") r = rFrom.map((v, i) => v + (rTo[i] - v) * e);
+    r = rFrom.map((v, i) => v + (rTo[i] - v) * e);
     if (u >= 1) land(anim);
   }
-  if (st === "fail" && now - tState > (outcome === "extreme" ? 2600 : 2300)) nextAttempt();
+  if (st === "reveal" && now - tState > 750) finishAttempt();
+  if (st === "fail") { const e = ease((now - tState) / 400); r = rFrom.map((v, i) => v + (rTo[i] - v) * e); if (now - tState > (outcome === "extreme" ? 2600 : 2400)) nextAttempt(); }
   if (st === "complete") { const e = ease((now - tState) / 500); r = rFrom.map((v, i) => v + (rTo[i] - v) * e); if (now - tState > 1700) toResult(); }
   updParts(dt);
 
